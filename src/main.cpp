@@ -12,27 +12,37 @@ int main() {
     std::string command;
     std::getline(std::cin, command);
 
+    // Check for EOF
+    if (std::cin.eof()) {
+      break;
+    }
+
+    // Tokenize the command
+    std::istringstream iss(command);
+    std::string cmd;
+    iss >> cmd;
+
     // Check if the command is "exit"
-    if (command.substr(0, 4) == "exit") {
-      // Extract the exit status argument
-      std::istringstream iss(command.substr(4));
+    if (cmd == "exit") {
       int exitStatus = 0;
       iss >> exitStatus;
-
-      // If there's no argument, exit with status 0
-      if (iss.fail()) {
-        exitStatus = 0;
-      }
-
-      // Terminate the program with the specified exit status
       return exitStatus;
     }
 
-    if (!std::cin.eof()) {
-      std::cerr << command << ": command not found" << std::endl;
-    } else {
-      break;
+    // Check if the command is "echo"
+    if (cmd == "echo") {
+      std::string arg;
+      bool first = true;
+      while (iss >> arg) {
+        if (!first) std::cout << " ";
+        std::cout << arg;
+        first = false;
+      }
+      std::cout << std::endl;
+      continue;
     }
+
+    std::cerr << cmd << ": command not found" << std::endl;
   }
 
   return 0;
