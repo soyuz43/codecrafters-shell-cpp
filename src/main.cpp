@@ -7,6 +7,10 @@ int main() {
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
 
+
+   // Define builtin commands
+  std::set<std::string> builtins = {"echo", "exit", "type"};
+  
   while (true) {
     std::cout << "$ ";
     std::string command;
@@ -39,6 +43,18 @@ int main() {
         first = false;
       }
       std::cout << std::endl;
+      continue;
+    }
+    // Check if the command is "type"
+    if (cmd == "type") {
+      std::string target;
+      iss >> target;
+      
+      if (builtins.find(target) != builtins.end()) {
+        std::cout << target << " is a shell builtin" << std::endl;
+      } else {
+        std::cout << target << ": not found" << std::endl;
+      }
       continue;
     }
 
