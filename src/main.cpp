@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 #include <cctype>
 #include <locale>
@@ -457,26 +458,27 @@ void execute_command(const fs::path& program, const std::vector<std::string>& ar
 int main() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
-    
-    const std::set<std::string> builtins = {"echo", "exit", "type"};
+
+    // Add "pwd" to the set of built-in commands
+    const std::set<std::string> builtins = {"echo", "exit", "type", "pwd"};
     PathCache path_cache;
-    
+
     while (true) {
         std::cout << "$ " << std::flush;
-        
+
         std::string line;
         if (!std::getline(std::cin, line)) {
             std::cout << std::endl;
             break;
         }
-        
+
         if (line.find_first_not_of(" \t") == std::string::npos) continue;
-        
+
         auto args = tokenize_command(line);
-        if (args.empty()) continue;  // Handle tokenizer error
-        
+        if (args.empty()) continue; // Handle tokenizer error
+
         const auto& cmd = args[0];
-        
+
         if (cmd == "exit") {
             int code = 0;
             if (args.size() > 1) {
@@ -492,7 +494,8 @@ int main() {
             }
             return code;
         }
-        
+
+        // Handle echo command
         if (cmd == "echo") {
             for (size_t i = 1; i < args.size(); ++i) {
                 if (i > 1) std::cout << ' ';
@@ -501,19 +504,20 @@ int main() {
             std::cout << '\n';
             continue;
         }
-        
+
+        // Handle type command
         if (cmd == "type") {
             if (args.size() < 2) {
                 std::cerr << "type: missing argument\n";
                 continue;
             }
-            
+
             const auto& target = args[1];
             if (builtins.count(target)) {
                 std::cout << target << " is a shell builtin\n";
                 continue;
             }
-            
+
             auto path = path_cache.find(target);
             if (path.empty()) {
                 std::cerr << target << ": not found\n";
@@ -522,16 +526,28 @@ int main() {
             }
             continue;
         }
-        
-        // External command
+
+        // Handle pwd command
+        if (cmd == "pwd") {
+            try {
+                // Use std::filesystem::current_path() to get the current directory
+                std::cout << fs::current_path() << '\n';
+            } catch (const fs::filesystem_error& ex) {
+                // Handle potential errors (e.g., permissions, inaccessible path)
+                std::cerr << "pwd: error accessing current directory: " << ex.what() << '\n';
+            }
+            continue; // Move to the next prompt after printing
+        }
+
+        // External command handling (as before)
         auto path = path_cache.find(cmd);
         if (path.empty()) {
             std::cerr << cmd << ": command not found\n";
             continue;
         }
-        
+
         execute_command(path, args);
     }
-    
+
     return 0;
 }
