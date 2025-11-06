@@ -527,18 +527,17 @@ int main() {
             continue;
         }
 
-        // Handle pwd command
-        if (cmd == "pwd") {
-            try {
-                // Use std::filesystem::current_path() to get the current directory
-                std::cout << fs::current_path() << '\n';
-            } catch (const fs::filesystem_error& ex) {
-                // Handle potential errors (e.g., permissions, inaccessible path)
-                std::cerr << "pwd: error accessing current directory: " << ex.what() << '\n';
-            }
-            continue; // Move to the next prompt after printing
-        }
-
+// Handle pwd command
+if (cmd == "pwd") {
+    try {
+        // Use .string() to get the path as a standard string
+        std::cout << fs::current_path().string() << '\n';
+    } catch (const fs::filesystem_error& ex) {
+        // Handle potential errors (e.g., permissions, inaccessible path)
+        std::cerr << "pwd: error accessing current directory: " << ex.what() << '\n';
+    }
+    continue; // Move to the next prompt after printing
+}
         // External command handling (as before)
         auto path = path_cache.find(cmd);
         if (path.empty()) {
