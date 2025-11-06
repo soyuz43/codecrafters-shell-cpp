@@ -539,42 +539,82 @@ if (cmd == "pwd") {
     continue; // Move to the next prompt after printing
 }
 
-        // Handle cd command (absolute and relative paths)
+        // Handle cd command (absolute, relative, and ~ paths)
         if (cmd == "cd") {
             if (args.size() != 2) {
                 std::cerr << "cd: expected 1 argument, got " << (args.size() - 1) << '\n';
                 continue;
             }
 
-            const std::string& target_dir = args[1];
+            std::string target_dir = args[1]; // Use a copy that we might modify
 
-            // Determine if it's an absolute path (starts with '/' on POSIX, or drive letter + ':' on Windows)
+            // Check if the path starts with ~ or is exactly ~
+            if (target_dir == "~" || (target_dir.size() >= 2 && target_dir[0] == '~' && target_dir[1] == '/')) {
+                // Get the HOME environment variable
+                const char* home_cstr = std::getenv("HOME");
+                #ifdef _WIN32
+                    // On Windows, HOME might not be set, try USERPROFILE or HOMEDRIVE + HOMEPATH
+                    if (!home_cstr) {
+                        home_cstr = std::getenv("USERPROFILE");
+                    }
+                    if (!home_cstr) {
+                        const char* drive = std::getenv("HOMEDRIVE");
+                        const char* path = std::getenv("HOMEPATH");
+                        if (drive && path) {
+                            std::string home_win = std::string(drive) + path;
+                            home_cstr = home_win.c_str();
+                        }
+                    }
+                #endif
+
+                if (!home_cstr) {
+                    std::cerr << "cd: HOME not set\n";
+                    continue; // Stay in current directory if HOME is not available
+                }
+
+                std::string home_dir(home_cstr);
+
+                // If target was just "~", use the home directory directly
+                if (target_dir == "~") {
+                    target_dir = home_dir;
+                } else {
+                    // If target was "~/" or "~/path", replace ~ with home_dir
+                    // Remove the leading "~/" and append the rest to home_dir
+                    std::string relative_part = target_dir.substr(2); // Remove "~/"
+                    // Use fs::path to correctly combine paths (handles trailing / in home_dir correctly)
+                    fs::path combined_path(home_dir);
+                    combined_path /= relative_part; // or combined_path = home_dir / relative_part;
+                    target_dir = combined_path.string();
+                }
+            }
+            // If the path did not start with ~, target_dir remains unchanged
+
+
+            // Now, target_dir contains the resolved path (absolute or relative after ~ expansion)
+            // Continue with the same logic as before for absolute/relative path handling
+
+            // Determine if the *resolved* path is now absolute
             fs::path target_path(target_dir);
             bool is_absolute = target_path.is_absolute();
 
-            // If it's not absolute, resolve it relative to the current working directory
+            // If it's not absolute (it was a relative path like 'dirname' or './dirname'),
+            // resolve it relative to the current working directory
             if (!is_absolute) {
                 // Get the current working directory
                 fs::path current_dir = fs::current_path();
                 // Combine current directory with the relative path
                 target_path = current_dir / target_path;
             }
-            // If it was absolute, target_path already holds the correct path
+            // If it was absolute (either originally like '/path' or resolved from '~' like '/home/user'),
+            // target_path already holds the correct absolute path
 
-            // Now, target_path contains the absolute path we want to go to (or an invalid path)
             // Normalize the path to resolve '.' and '..' components
-            // weakly_canonical handles resolution and also checks if intermediate parts exist (except the last component)
-            // If you want to allow paths where intermediate dirs might not exist (like `mkdir -p` style), use `lexically_normal` instead,
-            // but for cd, weakly_canonical is safer as it checks parent dirs.
             try {
                 target_path = fs::weakly_canonical(target_path);
             } catch (const fs::filesystem_error&) {
-                // If weakly_canonical fails (e.g., due to permissions on a parent directory),
-                // it means we cannot resolve the path correctly.
                 std::cerr << "cd: error resolving path: " << args[1] << '\n';
                 continue; // Stay in current directory
             }
-
 
             // Validate the final resolved path exists and is a directory
             if (!fs::exists(target_path)) {
