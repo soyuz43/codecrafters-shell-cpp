@@ -538,6 +538,48 @@ if (cmd == "pwd") {
     }
     continue; // Move to the next prompt after printing
 }
+
+        // Handle cd command (absolute paths only for now)
+        if (cmd == "cd") {
+            if (args.size() != 2) {
+                std::cerr << "cd: expected 1 argument, got " << (args.size() - 1) << '\n';
+                // Or a more standard error message:
+                // std::cerr << "cd: invalid argument count\n";
+                continue;
+            }
+
+            const std::string& target_dir = args[1];
+
+            // Check if it's an absolute path (starts with '/')
+            if (target_dir.empty() || target_dir[0] != '/') {
+                std::cerr << "cd: " << target_dir << ": Path is not absolute (relative paths not supported yet)\n";
+                continue;
+            }
+
+            fs::path target_path(target_dir);
+
+            try {
+                if (!fs::exists(target_path)) {
+                    std::cerr << "cd: " << target_dir << ": No such file or directory\n";
+                    continue; // Stay in current directory
+                }
+
+                if (!fs::is_directory(target_path)) {
+                    std::cerr << "cd: " << target_dir << ": Not a directory\n";
+                    continue; // Stay in current directory
+                }
+
+                // Attempt to change the current directory
+                fs::current_path(target_path);
+                // Success: directory changed, loop continues normally
+            } catch (const fs::filesystem_error& ex) {
+                // Handle potential errors during the change (e.g., permissions)
+                std::cerr << "cd: error changing to " << target_dir << ": " << ex.what() << '\n';
+                // Stay in current directory
+            }
+            continue; // Move to the next prompt after attempting cd
+        }
+
         // External command handling (as before)
         auto path = path_cache.find(cmd);
         if (path.empty()) {
