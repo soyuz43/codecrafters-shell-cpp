@@ -4,160 +4,534 @@
 #include <set>
 #include <vector>
 #include <cstdlib>
+#include <filesystem>
+#include <optional>
+#include <unordered_map>
+#include <stdexcept>
+#include <cctype>
+#include <locale>
+#include <algorithm>
+
+namespace fs = std::filesystem;
 
 #ifdef _WIN32
-#include <io.h>
-#define F_OK 0
-#define X_OK 1
-#define access _access
-const char PATH_SEPARATOR = ';';
+#include <windows.h>
+#include <shellapi.h>
+#include <cwchar>
 #else
 #include <unistd.h>
-const char PATH_SEPARATOR = ':';
+#include <sys/wait.h>
+#include <sys/stat.h>
 #endif
 
+// Safe trim functions
+inline void trim(std::string& s) {
+    auto first = s.find_first_not_of(" \t");
+    if (first == std::string::npos) { s.clear(); return; }
+    auto last = s.find_last_not_of(" \t");
+    s.erase(last + 1);
+    s.erase(0, first);
+}
+
+inline void trim(std::wstring& s) {
+    auto first = s.find_first_not_of(L" \t");
+    if (first == std::wstring::npos) { s.clear(); return; }
+    auto last = s.find_last_not_of(L" \t");
+    s.erase(last + 1);
+    s.erase(0, first);
+}
+
+// Platform-specific environment access
 #ifdef _WIN32
-#include <sys/stat.h>
-bool is_executable(const std::string& path) {
-    struct stat st;
-    if (stat(path.c_str(), &st) != 0) {
-        return false;
-    }
-    // On Windows, check if file exists and is not a directory
-    return (st.st_mode & _S_IFREG) != 0;
+std::optional<std::wstring> get_wenv(const wchar_t* name) {
+    const wchar_t* val = _wgetenv(name);
+    if (!val || *val == L'\0') return std::nullopt;
+    return std::wstring(val);
+}
+
+std::string wide_to_utf8(const std::wstring& wstr) {
+    if (wstr.empty()) return "";
+    
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (size_needed <= 0) return "";
+    
+    std::vector<char> buffer(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, buffer.data(), size_needed, nullptr, nullptr);
+    return std::string(buffer.data());
+}
+
+std::wstring utf8_to_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring w(n-1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
+    return w;
 }
 #else
-bool is_executable(const std::string& path) {
-    return access(path.c_str(), X_OK) == 0;
+std::optional<std::string> get_env(const char* name) {
+    const char* val = std::getenv(name);
+    if (!val || *val == '\0') return std::nullopt;
+    return std::string(val);
 }
 #endif
 
-std::vector<std::string> split_path(const std::string& path_env) {
-    std::vector<std::string> directories;
-    std::stringstream ss(path_env);
-    std::string dir;
+std::vector<fs::path> get_path_directories() {
+#ifdef _WIN32
+    auto path_env = get_wenv(L"PATH");
+    if (!path_env) return {};
     
-    while (std::getline(ss, dir, PATH_SEPARATOR)) {
-        if (!dir.empty()) {
-            directories.push_back(dir);
+    std::vector<fs::path> dirs;
+    dirs.reserve(16); // Pre-allocate for common case
+    std::wstringstream ss(*path_env);
+    std::wstring dir;
+    while (std::getline(ss, dir, L';')) {
+        trim(dir);
+        if (!dir.empty()) dirs.push_back(fs::path(dir));
+    }
+    return dirs;
+#else
+    auto path_env = get_env("PATH");
+    if (!path_env) return {};
+    
+    std::vector<fs::path> dirs;
+    dirs.reserve(16);
+    std::stringstream ss(*path_env);
+    std::string dir;
+    while (std::getline(ss, dir, ':')) {
+        if (dir.empty()) {
+            dirs.push_back(fs::path("."));
+        } else {
+            trim(dir);
+            if (!dir.empty()) dirs.push_back(fs::path(dir));
         }
     }
-    
-    return directories;
+    return dirs;
+#endif
 }
 
 std::vector<std::string> get_executable_extensions() {
 #ifdef _WIN32
-    const char* pathext = std::getenv("PATHEXT");
-    if (pathext) {
+    auto pathext_env = get_wenv(L"PATHEXT");
+    if (pathext_env && !pathext_env->empty()) {
         std::vector<std::string> exts;
-        std::stringstream ss(pathext);
-        std::string ext;
-        while (std::getline(ss, ext, PATH_SEPARATOR)) {
-            if (!ext.empty()) {
-                // Ensure leading dot
-                if (ext[0] != '.') {
-                    ext = "." + ext;
-                }
-                exts.push_back(ext);
-            }
+        std::unordered_set<std::string> seen;
+        std::wstringstream ss(*pathext_env);
+        std::wstring ext;
+        while (std::getline(ss, ext, L';')) {
+            trim(ext);
+            if (ext.empty()) continue;
+            if (ext[0] != L'.') ext = L'.' + ext;
+            auto u8 = wide_to_utf8(ext);
+            for (auto& c : u8) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (seen.insert(u8).second) exts.push_back(std::move(u8));
         }
-        return exts;
+        if (!exts.empty()) return exts;
     }
-    // Fallback if PATHEXT is missing (unlikely on real Windows)
-    return {".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".JS", ".PY"};
+    return {".exe", ".bat", ".cmd", ".com"};
 #else
-    // Unix: only the plain filename
     return {""};
 #endif
 }
 
-std::string find_in_path(const std::string& command) {
-    const char* path_env = std::getenv("PATH");
-    if (!path_env) {
-        return "";
+class PathCache {
+    std::unordered_map<std::string, std::optional<fs::path>> cache;
+    std::string last_path_value;
+    std::string last_pathext_value;
+    std::vector<fs::path> path_directories;
+    std::vector<std::string> executable_extensions;
+    
+    bool environment_changed() {
+#ifdef _WIN32
+        auto path_val = get_wenv(L"PATH");
+        auto pathext_val = get_wenv(L"PATHEXT");
+        bool changed = (!path_val || wide_to_utf8(*path_val) != last_path_value) || 
+                      (!pathext_val || wide_to_utf8(*pathext_val) != last_pathext_value);
+        if (changed) {
+            last_path_value = path_val ? wide_to_utf8(*path_val) : "";
+            last_pathext_value = pathext_val ? wide_to_utf8(*pathext_val) : "";
+            path_directories = get_path_directories();
+            executable_extensions = get_executable_extensions();
+            cache.clear();
+        }
+        return changed;
+#else
+        auto path_val = get_env("PATH");
+        bool changed = (!path_val || *path_val != last_path_value);
+        if (changed) {
+            last_path_value = path_val ? *path_val : "";
+            path_directories = get_path_directories();
+            executable_extensions = get_executable_extensions();
+            cache.clear();
+        }
+        return changed;
+#endif
     }
     
-    std::vector<std::string> directories = split_path(path_env);
-    std::vector<std::string> extensions = get_executable_extensions();
-
-    for (const auto& dir : directories) {
-        for (const auto& ext : extensions) {
-            std::string candidate = dir + "/" + command + ext;
-            if (access(candidate.c_str(), F_OK) == 0 && is_executable(candidate)) {
-                return candidate;
+    fs::path resolve_path_internal(const std::string& cmd, bool direct_path) {
+        if (direct_path) {
+            fs::path candidate(cmd);
+            try {
+                if (fs::exists(candidate) && fs::is_regular_file(candidate)) {
+#ifdef _WIN32
+                    return fs::weakly_canonical(candidate);
+#else
+                    if (access(candidate.string().c_str(), X_OK) == 0) {
+                        return fs::weakly_canonical(candidate);
+                    }
+#endif
+                }
+            } catch (const fs::filesystem_error&) {
+                // File disappeared - skip
+            }
+            return {};
+        }
+        
+        auto try_one = [](const fs::path& p) -> fs::path {
+            try {
+                if (fs::exists(p) && fs::is_regular_file(p)) {
+#ifdef _WIN32
+                    return fs::weakly_canonical(p);
+#else
+                    if (access(p.string().c_str(), X_OK) == 0) {
+                        return fs::weakly_canonical(p);
+                    }
+#endif
+                }
+            } catch (const fs::filesystem_error&) {}
+            return {};
+        };
+        
+#ifdef _WIN32
+        bool has_ext = fs::path(cmd).has_extension();
+        
+        // Try current directory first on Windows
+        try {
+            if (has_ext) {
+                if (auto p = try_one(fs::current_path() / cmd); !p.empty()) return p;
+            }
+            for (const auto& ext : executable_extensions) {
+                if (auto p = try_one(fs::current_path() / (cmd + ext)); !p.empty()) return p;
+            }
+        } catch (const fs::filesystem_error&) {
+            // Current path access failed, continue to PATH search
+        }
+        
+        for (const auto& dir : path_directories) {
+            if (has_ext) {
+                if (auto p = try_one(dir / cmd); !p.empty()) return p;
+            }
+            for (const auto& ext : executable_extensions) {
+                if (auto p = try_one(dir / (cmd + ext)); !p.empty()) return p;
             }
         }
+#else
+        for (const auto& dir : path_directories) {
+            for (const auto& ext : executable_extensions) {
+                if (auto p = try_one(dir / (cmd + ext)); !p.empty()) return p;
+            }
+        }
+#endif
+        
+        return {};
     }
     
-    return "";
+public:
+    PathCache() {
+        environment_changed();
+    }
+    
+    fs::path find(const std::string& cmd) {
+        if (cmd.empty()) return {};
+        
+        environment_changed();
+        
+#ifdef _WIN32
+        std::string cache_key = cmd;
+        std::transform(cache_key.begin(), cache_key.end(), cache_key.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+#else
+        const std::string& cache_key = cmd;
+#endif
+        
+        if (auto it = cache.find(cache_key); it != cache.end()) {
+            return it->second.value_or(fs::path{});
+        }
+        
+        bool direct_path = (cmd.find('/') != std::string::npos || 
+                           cmd.find('\\') != std::string::npos ||
+                           (cmd.size() >= 2 && cmd[1] == ':'));
+        
+        auto path = resolve_path_internal(cmd, direct_path);
+        cache[cache_key] = path.empty() ? std::nullopt : std::make_optional(path);
+        return path;
+    }
+};
+
+std::vector<std::string> tokenize_command(const std::string& line) {
+    std::vector<std::string> tokens;
+    tokens.reserve(8);
+    std::string token;
+    bool in_double_quotes = false;
+    bool in_single_quotes = false;
+    bool escape_next = false;
+    
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        
+        if (escape_next) {
+            token += c;
+            escape_next = false;
+            continue;
+        }
+        
+#ifdef _WIN32
+        // Windows: Only escape inside double quotes
+        if (in_double_quotes && c == '\\' && i + 1 < line.size()) {
+            if (line[i+1] == '"' || line[i+1] == '\\') {
+                escape_next = true;
+                continue;
+            }
+        }
+#else
+        // Unix: Handle single quotes
+        if (c == '\'' && !in_double_quotes) {
+            in_single_quotes = !in_single_quotes;
+            continue;
+        }
+        
+        // Unix: Handle line continuation
+        if (!in_single_quotes && !in_double_quotes && c == '\\' && i+1 < line.size() && line[i+1] == '\n') {
+            ++i; // skip the newline
+            continue;
+        }
+        
+        // Unix: Only escape specific chars inside double quotes, all chars outside
+        if (c == '\\' && i + 1 < line.size()) {
+            if (in_double_quotes) {
+                if (line[i+1] == '"' || line[i+1] == '\\' || line[i+1] == '$' || line[i+1] == '`') {
+                    escape_next = true;
+                    continue;
+                }
+            } else {
+                escape_next = true;
+                continue;
+            }
+        }
+#endif
+        
+        if (c == '"' && !in_single_quotes) {
+            in_double_quotes = !in_double_quotes;
+            continue;
+        }
+        
+        if (std::isspace(static_cast<unsigned char>(c)) && !in_double_quotes && !in_single_quotes) {
+            if (!token.empty()) {
+                tokens.push_back(token);
+                token.clear();
+            }
+            continue;
+        }
+        
+        token += c;
+    }
+    
+    // Check for unclosed quotes
+    if (in_double_quotes || in_single_quotes) {
+        std::cerr << "Error: unclosed quote\n";
+        return {};  // Return empty tokens to indicate error
+    }
+    
+    if (!token.empty()) tokens.push_back(token);
+    return tokens;
 }
 
-int main() {
-    // Flush after every std::cout / std::cerr
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
-
-    // Define builtin commands
-    std::set<std::string> builtins = {"echo", "exit", "type"};
-
-    while (true) {
-        std::cout << "$ ";
-        std::string command;
-        std::getline(std::cin, command);
-
-        // Check for EOF
-        if (std::cin.eof()) {
-            break;
+#ifdef _WIN32
+std::wstring quote_windows_arg(const std::wstring& arg) {
+    if (arg.find_first_of(L" \t\"") == std::wstring::npos && 
+        arg.find_first_of(L'\n') == std::wstring::npos) {
+        return arg;
+    }
+    
+    std::wstring quoted = L"\"";
+    size_t backslash_count = 0;
+    
+    for (wchar_t wc : arg) {
+        if (wc == L'\\') {
+            backslash_count++;
+        } else if (wc == L'"') {
+            quoted.append(backslash_count * 2, L'\\');
+            quoted += L"\\\"";
+            backslash_count = 0;
+        } else {
+            quoted.append(backslash_count, L'\\');
+            quoted += wc;
+            backslash_count = 0;
         }
+    }
+    
+    quoted.append(backslash_count * 2, L'\\');
+    quoted += L'"';
+    return quoted;
+}
+#endif
 
-        // Tokenize the command
-        std::istringstream iss(command);
-        std::string cmd;
-        iss >> cmd;
+// Global for exit status tracking
+int last_status = 0;
 
-        // Check if the command is "exit"
-        if (cmd == "exit") {
-            int exitStatus = 0;
-            iss >> exitStatus;
-            return exitStatus;
-        }
-
-        // Check if the command is "echo"
-        if (cmd == "echo") {
-            std::string arg;
-            bool first = true;
-            while (iss >> arg) {
-                if (!first) std::cout << " ";
-                std::cout << arg;
-                first = false;
-            }
-            std::cout << std::endl;
-            continue;
-        }
-
-        // Check if the command is "type"
-        if (cmd == "type") {
-            std::string target;
-            iss >> target;
-            
-            // First check if it's a builtin
-            if (builtins.find(target) != builtins.end()) {
-                std::cout << target << " is a shell builtin" << std::endl;
-            } else {
-                // Search in PATH
-                std::string path = find_in_path(target);
-                if (!path.empty()) {
-                    std::cout << target << " is " << path << std::endl;
-                } else {
-                    std::cout << target << ": not found" << std::endl;
-                }
-            }
-            continue;
-        }
-
-        std::cerr << cmd << ": command not found" << std::endl;
+#ifdef _WIN32
+void execute_command(const fs::path& program, const std::vector<std::string>& args) {
+    // Build full command line including argv[0]
+    std::wstring full = quote_windows_arg(program.wstring());
+    for (size_t i = 1; i < args.size(); ++i) {
+        full += L' ';
+        full += quote_windows_arg(utf8_to_wide(args[i]));
     }
 
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    std::vector<wchar_t> mutable_cmd(full.begin(), full.end());
+    mutable_cmd.push_back(L'\0');
+
+    if (!CreateProcessW(
+            nullptr,                    // let Windows parse argv[0] from command line
+            mutable_cmd.data(),         // MUST be mutable
+            nullptr, nullptr,
+            FALSE,                      // don't inherit handles unless needed
+            0,
+            nullptr,
+            nullptr,
+            &si, &pi)) {
+        DWORD err = GetLastError();
+        LPWSTR msg = nullptr;
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+                       nullptr, err, 0, (LPWSTR)&msg, 0, nullptr);
+        std::string error_msg = msg ? wide_to_utf8(msg) : "Unknown error";
+        std::cerr << "Execute failed (" << err << "): " << error_msg << std::endl;
+        if (msg) LocalFree(msg);
+        return;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+}
+#else
+void execute_command(const fs::path& program, const std::vector<std::string>& args) {
+    // Create copies and then create argv array pointing to those copies
+    std::vector<std::string> arg_copies;
+    arg_copies.reserve(args.size());
+    for (const auto& arg : args) {
+        arg_copies.push_back(arg);
+    }
+    std::vector<char*> argv;
+    argv.reserve(arg_copies.size() + 1);
+    for (auto& arg : arg_copies) {
+        argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+    
+    pid_t pid = fork();
+    if (pid == 0) {
+        execv(program.string().c_str(), argv.data());
+        perror("exec failed");
+        _exit(127);
+    } else if (pid > 0) {
+        int status = 0;
+        if (waitpid(pid, &status, 0) == -1) {
+            perror("waitpid");
+        } else if (WIFSIGNALED(status)) {
+            std::cerr << "terminated by signal " << WTERMSIG(status) << "\n";
+            last_status = 128 + WTERMSIG(status);
+        } else if (WIFEXITED(status)) {
+            last_status = WEXITSTATUS(status);
+        }
+    } else {
+        perror("fork failed");
+    }
+}
+#endif
+
+int main() {
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+    
+    const std::set<std::string> builtins = {"echo", "exit", "type"};
+    PathCache path_cache;
+    
+    while (true) {
+        std::cout << "$ " << std::flush;
+        
+        std::string line;
+        if (!std::getline(std::cin, line)) {
+            std::cout << std::endl;
+            break;
+        }
+        
+        if (line.find_first_not_of(" \t") == std::string::npos) continue;
+        
+        auto args = tokenize_command(line);
+        if (args.empty()) continue;  // Handle tokenizer error
+        
+        const auto& cmd = args[0];
+        
+        if (cmd == "exit") {
+            int code = 0;
+            if (args.size() > 1) {
+                try {
+                    code = std::stoi(args[1]);
+                } catch (const std::invalid_argument&) {
+                    std::cerr << "exit: invalid number\n";
+                    continue;
+                } catch (const std::out_of_range&) {
+                    std::cerr << "exit: number out of range\n";
+                    continue;
+                }
+            }
+            return code;
+        }
+        
+        if (cmd == "echo") {
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (i > 1) std::cout << ' ';
+                std::cout << args[i];
+            }
+            std::cout << '\n';
+            continue;
+        }
+        
+        if (cmd == "type") {
+            if (args.size() < 2) {
+                std::cerr << "type: missing argument\n";
+                continue;
+            }
+            
+            const auto& target = args[1];
+            if (builtins.count(target)) {
+                std::cout << target << " is a shell builtin\n";
+                continue;
+            }
+            
+            auto path = path_cache.find(target);
+            if (path.empty()) {
+                std::cerr << target << ": not found\n";
+            } else {
+                std::cout << target << " is " << path.string() << '\n';
+            }
+            continue;
+        }
+        
+        // External command
+        auto path = path_cache.find(cmd);
+        if (path.empty()) {
+            std::cerr << cmd << ": command not found\n";
+            continue;
+        }
+        
+        execute_command(path, args);
+    }
+    
     return 0;
 }
