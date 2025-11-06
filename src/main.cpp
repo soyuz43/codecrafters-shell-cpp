@@ -539,42 +539,61 @@ if (cmd == "pwd") {
     continue; // Move to the next prompt after printing
 }
 
-        // Handle cd command (absolute paths only for now)
+        // Handle cd command (absolute and relative paths)
         if (cmd == "cd") {
             if (args.size() != 2) {
                 std::cerr << "cd: expected 1 argument, got " << (args.size() - 1) << '\n';
-                // Or a more standard error message:
-                // std::cerr << "cd: invalid argument count\n";
                 continue;
             }
 
             const std::string& target_dir = args[1];
 
-            // Check if it's an absolute path (starts with '/')
-            if (target_dir.empty() || target_dir[0] != '/') {
-                std::cerr << "cd: " << target_dir << ": Path is not absolute (relative paths not supported yet)\n";
-                continue;
+            // Determine if it's an absolute path (starts with '/' on POSIX, or drive letter + ':' on Windows)
+            fs::path target_path(target_dir);
+            bool is_absolute = target_path.is_absolute();
+
+            // If it's not absolute, resolve it relative to the current working directory
+            if (!is_absolute) {
+                // Get the current working directory
+                fs::path current_dir = fs::current_path();
+                // Combine current directory with the relative path
+                target_path = current_dir / target_path;
+            }
+            // If it was absolute, target_path already holds the correct path
+
+            // Now, target_path contains the absolute path we want to go to (or an invalid path)
+            // Normalize the path to resolve '.' and '..' components
+            // weakly_canonical handles resolution and also checks if intermediate parts exist (except the last component)
+            // If you want to allow paths where intermediate dirs might not exist (like `mkdir -p` style), use `lexically_normal` instead,
+            // but for cd, weakly_canonical is safer as it checks parent dirs.
+            try {
+                target_path = fs::weakly_canonical(target_path);
+            } catch (const fs::filesystem_error&) {
+                // If weakly_canonical fails (e.g., due to permissions on a parent directory),
+                // it means we cannot resolve the path correctly.
+                std::cerr << "cd: error resolving path: " << args[1] << '\n';
+                continue; // Stay in current directory
             }
 
-            fs::path target_path(target_dir);
 
+            // Validate the final resolved path exists and is a directory
+            if (!fs::exists(target_path)) {
+                std::cerr << "cd: " << args[1] << ": No such file or directory\n";
+                continue; // Stay in current directory
+            }
+
+            if (!fs::is_directory(target_path)) {
+                std::cerr << "cd: " << args[1] << ": Not a directory\n";
+                continue; // Stay in current directory
+            }
+
+            // Attempt to change the current directory to the resolved absolute path
             try {
-                if (!fs::exists(target_path)) {
-                    std::cerr << "cd: " << target_dir << ": No such file or directory\n";
-                    continue; // Stay in current directory
-                }
-
-                if (!fs::is_directory(target_path)) {
-                    std::cerr << "cd: " << target_dir << ": Not a directory\n";
-                    continue; // Stay in current directory
-                }
-
-                // Attempt to change the current directory
                 fs::current_path(target_path);
                 // Success: directory changed, loop continues normally
             } catch (const fs::filesystem_error& ex) {
                 // Handle potential errors during the change (e.g., permissions)
-                std::cerr << "cd: error changing to " << target_dir << ": " << ex.what() << '\n';
+                std::cerr << "cd: error changing to " << args[1] << ": " << ex.what() << '\n';
                 // Stay in current directory
             }
             continue; // Move to the next prompt after attempting cd
