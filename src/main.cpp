@@ -274,58 +274,80 @@ std::vector<std::string> tokenize_command(const std::string& line) {
     tokens.reserve(8);
     std::string token;
     bool in_double_quotes = false;
-    bool in_single_quotes = false;
+    bool in_single_quotes = false; // Track if we're inside single quotes
     bool escape_next = false;
     
     for (size_t i = 0; i < line.size(); ++i) {
         char c = line[i];
         
         if (escape_next) {
-            token += c;
-            escape_next = false;
+            // Only process escape if NOT inside single quotes
+            if (!in_single_quotes) {
+                token += c;
+                escape_next = false;
+                continue;
+            }
+            // If inside single quotes, the backslash that triggered escape_next
+            // should be treated literally. Fall through to add the backslash below.
+        }
+        
+#ifndef _WIN32
+        // Unix-specific handling
+        // Handle single quotes: Toggle state, don't process content inside
+        if (c == '\'' && !in_double_quotes) {
+            in_single_quotes = !in_single_quotes;
+            continue; // Don't add the quote itself to the token yet, just toggle state
+        }
+        
+        // Handle line continuation (only outside quotes)
+        if (!in_single_quotes && !in_double_quotes && c == '\\' && i+1 < line.size() && line[i+1] == '\n') {
+            ++i; // skip the newline
             continue;
         }
         
+        // Handle backslash escaping (only outside single quotes)
+        if (c == '\\' && i + 1 < line.size() && !in_single_quotes) {
+            if (in_double_quotes) {
+                // Inside double quotes, only specific chars are escapable
+                if (line[i+1] == '"' || line[i+1] == '\\' || line[i+1] == '$' || line[i+1] == '`') {
+                    escape_next = true;
+                    continue;
+                }
+                // Otherwise, add the backslash literally inside double quotes
+            } else {
+                // Outside quotes, backslash escapes the next character
+                escape_next = true;
+                continue;
+            }
+        }
+#endif
+
+        // Windows-specific handling (simplified, backslashes are less special inside double quotes here)
 #ifdef _WIN32
-        // Windows: Only escape inside double quotes
         if (in_double_quotes && c == '\\' && i + 1 < line.size()) {
             if (line[i+1] == '"' || line[i+1] == '\\') {
                 escape_next = true;
                 continue;
             }
         }
-#else
-        // Unix: Handle single quotes
-        if (c == '\'' && !in_double_quotes) {
-            in_single_quotes = !in_single_quotes;
-            continue;
-        }
-        
-        // Unix: Handle line continuation
-        if (!in_single_quotes && !in_double_quotes && c == '\\' && i+1 < line.size() && line[i+1] == '\n') {
-            ++i; // skip the newline
-            continue;
-        }
-        
-        // Unix: Only escape specific chars inside double quotes, all chars outside
-        if (c == '\\' && i + 1 < line.size()) {
-            if (in_double_quotes) {
-                if (line[i+1] == '"' || line[i+1] == '\\' || line[i+1] == '$' || line[i+1] == '`') {
-                    escape_next = true;
-                    continue;
-                }
-            } else {
-                escape_next = true;
-                continue;
-            }
-        }
 #endif
-        
+
+        // Handle double quotes (works the same regardless of single quote state for toggling)
         if (c == '"' && !in_single_quotes) {
             in_double_quotes = !in_double_quotes;
             continue;
         }
+
+        // If we reach here and we were in an escape sequence inside single quotes,
+        // the backslash should be added literally now.
+        if (escape_next && in_single_quotes) {
+             token += '\\'; // Add the backslash that started the escape
+             token += c;    // Add the character that was supposed to be escaped (but wasn't)
+             escape_next = false;
+             continue;
+        }
         
+        // Handle token separation (only outside quotes)
         if (std::isspace(static_cast<unsigned char>(c)) && !in_double_quotes && !in_single_quotes) {
             if (!token.empty()) {
                 tokens.push_back(token);
@@ -334,6 +356,7 @@ std::vector<std::string> tokenize_command(const std::string& line) {
             continue;
         }
         
+        // Add character to current token (this includes quotes for now, they're handled by the toggling logic)
         token += c;
     }
     
