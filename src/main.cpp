@@ -227,6 +227,11 @@ class PathCache {
             }
         }
 #else
+        // Try current directory first on Unix
+        for (const auto& ext : executable_extensions) {
+            if (auto p = try_one(fs::current_path() / (cmd + ext)); !p.empty()) return p;
+        }
+        
         for (const auto& dir : path_directories) {
             for (const auto& ext : executable_extensions) {
                 if (auto p = try_one(dir / (cmd + ext)); !p.empty()) return p;
